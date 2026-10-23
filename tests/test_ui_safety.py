@@ -108,6 +108,27 @@ class UISafetyTests(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_process_inspection_request_routes_to_local_even_when_cloud_is_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self.make_window(directory)
+            try:
+                window.snapshot = HardwareSnapshot(16 * 1024**3, 8 * 1024**3, "AMD64", 8,
+                                                   None, None, None, True, True, ())
+                window.models.addItem("test:local")
+                window.input.setText("List my running applications")
+                with patch.object(QMessageBox, "question") as cloud_confirm, \
+                     patch.object(window, "_start_generation") as start:
+                    window._send()
+                cloud_confirm.assert_not_called()
+                start.assert_called_once()
+                self.assertEqual(start.call_args.args[1], "local")
+                self.assertTrue(start.call_args.kwargs["inspect_processes"])
+                self.assertEqual(window.backend.currentData(), "cloud")
+                self.assertEqual(window.store.get_messages(window.conversation_id)[0]["content"],
+                                 "List my running applications")
+            finally:
+                window.close()
+
     def test_cpu_retry_cannot_switch_to_a_different_conversation(self):
         with tempfile.TemporaryDirectory() as directory:
             window = self.make_window(directory)

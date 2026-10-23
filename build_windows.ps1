@@ -10,18 +10,21 @@ $spec = Join-Path $project 'packaging\FRIDAY.spec'
 if (-not (Test-Path -LiteralPath $spec -PathType Leaf)) { throw "Missing build spec: $spec" }
 $entry = Join-Path $project 'app\main.py'
 if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) { throw "Missing FRIDAY entry point: $entry" }
-$dist = Join-Path $project 'dist\FRIDAY'
+$buildTag = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+$distRoot = Join-Path $project "dist\FRIDAY_$buildTag"
+$dist = Join-Path $distRoot 'FRIDAY'
 $exe = Join-Path $dist 'FRIDAY.exe'
-$work = Join-Path $project 'build\pyinstaller_retry'
-if (Test-Path -LiteralPath $dist) {
-    throw "Distribution output already exists; refusing to overwrite: $dist"
+$work = Join-Path $project "build\pyinstaller_$buildTag"
+if ((Test-Path -LiteralPath $distRoot) -or (Test-Path -LiteralPath $dist)) {
+    throw "Distribution output already exists; refusing to overwrite: $distRoot"
 }
 if (Test-Path -LiteralPath $work) {
     throw "PyInstaller work directory already exists; refusing to overwrite: $work"
 }
 Write-Output "PyInstaller spec: $spec"
 Write-Output "Entry point: $entry"
-Write-Output "Distribution output: $dist"
+Write-Output "Distribution root: $distRoot"
+Write-Output "One-folder application directory: $dist"
 Write-Output "Expected executable: $exe"
 Write-Output "PyInstaller work directory: $work"
 
@@ -30,7 +33,7 @@ if ($LASTEXITCODE -ne 0) { throw "Build-tool installation failed with exit code 
 
 Push-Location -LiteralPath $project
 try {
-    & $python -m PyInstaller --noconfirm --clean --distpath (Join-Path $project 'dist') `
+    & $python -m PyInstaller --noconfirm --clean --distpath $distRoot `
     --workpath $work $spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 }

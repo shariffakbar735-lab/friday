@@ -5,7 +5,7 @@ FRIDAY is a local-first Windows desktop assistant. Local chat uses Ollama; cloud
 ## Requirements and run
 
 - Windows 10/11 and Python 3.11+
-- PySide6 (`requirements.txt`)
+- PySide6 and psutil (`requirements.txt`)
 - Ollama is optional for opening FRIDAY and viewing history, but required for local AI responses
 
 ```powershell
@@ -20,6 +20,10 @@ py -3.12 setup_friday.py
 If Ollama is missing, install its official Windows application and start it. FRIDAY checks whether Ollama responds and lists installed models; it never pulls a model automatically. Install models separately and only after reviewing the Ollama Library download size and the free storage on your machine.
 
 Chat data is stored at `%LOCALAPPDATA%\FRIDAY\friday.sqlite3`. Ollama calls default to `http://127.0.0.1:11434`.
+
+## Local Windows process inspection
+
+Ask FRIDAY to list or inspect running processes/applications (for example, “list my running applications”). FRIDAY reads process name, PID, executable path, and resident memory when Windows permits, using `psutil`. This operation is read-only and does not require administrator rights for ordinary listings. Fields blocked by Windows are reported as unavailable; processes that exit during collection are omitted. Large inventories are bounded to fit the selected model context and identify when the shown rows are truncated. FRIDAY routes these requests to local Ollama only—even if Cloud is selected—and never sends process metadata to a cloud provider. If local Ollama is unavailable or process inspection fails, FRIDAY reports that condition and does not ask a model to claim it succeeded.
 
 ## Hardware-aware setup
 
@@ -51,7 +55,7 @@ FRIDAY does not save the key in its settings or send conversation data while Loc
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The suite includes local mock-server tests for Ollama and the OpenAI-compatible streaming client, SQLite persistence, unavailable-runtime errors, selectable profile bounds, and simulated no-GPU/driver-failure cases. Simulating absent GPU validates graceful detection paths, **not real CPU inference performance**. A real GPU/CPU inference benchmark requires a running Ollama instance and installed model on each physical configuration.
+The suite includes local mock-server tests for Ollama and the OpenAI-compatible streaming client, SQLite persistence, unavailable-runtime errors, selectable profile bounds, simulated no-GPU/driver-failure cases, and mocked Windows process-inspection results and failures. Simulating absent GPU validates graceful detection paths, **not real CPU inference performance**. A real GPU/CPU inference benchmark requires a running Ollama instance and installed model on each physical configuration.
 
 ## Windows distribution (experimental first build)
 
@@ -67,7 +71,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_windows.ps1
 
 The `-ExecutionPolicy Bypass` applies only to this PowerShell process; it does not change the machine or user execution-policy setting. If `.venv` already exists but cannot launch, preserve it by renaming/archiving it first, then create a fresh `.venv` with the verified Python 3.12 interpreter before running setup.
 
-The build script installs `requirements-build.txt` into the project venv and produces `dist\FRIDAY\FRIDAY.exe`, with diagnostic intermediate files under `build\pyinstaller`. Direct build-tool versions are pinned; pip-resolved transitive dependencies are not yet locked, so builds are not guaranteed byte-for-byte reproducible. Both output trees are ignored by Git. The script refuses to overwrite existing outputs; move or archive them before another build. Zip the complete `dist\FRIDAY` directory to distribute it; do not send only the executable. PyInstaller's official documentation describes the one-folder layout and platform-specific build requirement. This is a portable app folder, **not an installer**, and it is not code-signed.
+The build script installs `requirements-build.txt` into the project venv and chooses a timestamped distribution root `dist\FRIDAY_<timestamp>` and work directory `build\pyinstaller_<timestamp>`. It prints both paths and refuses a timestamp collision; existing output directories are not deleted or overwritten. The executable is inside that root's `FRIDAY` one-folder directory. Direct build-tool versions are pinned; pip-resolved transitive dependencies are not yet locked, so builds are not guaranteed byte-for-byte reproducible. Both output trees are ignored by Git. Zip the complete generated `FRIDAY` directory to distribute it; do not send only the executable. PyInstaller's official documentation describes the one-folder layout and platform-specific build requirement. This is a portable app folder, **not an installer**, and it is not code-signed.
 
 Recipients must install Ollama separately and install at least one compatible model themselves. FRIDAY does not bundle Ollama or model weights and never downloads a model automatically. Ollama's current Windows requirements and installer instructions are on its [Windows documentation](https://docs.ollama.com/windows). Start Ollama before local chat. If it is unavailable, history and setup remain accessible, while local inference is disabled. Before a first model pull, users should review that model's published download size and their available storage; actual memory/performance varies with model quantization, context, and hardware.
 
