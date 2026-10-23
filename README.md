@@ -9,11 +9,13 @@ FRIDAY is a local-first Windows desktop assistant. Local chat uses Ollama; cloud
 - Ollama is optional for opening FRIDAY and viewing history, but required for local AI responses
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m app.main
+py -0p
+py -3.12 -m venv .venv
+py -3.12 setup_friday.py
+.\.venv\Scripts\python.exe -m app.main
 ```
+
+`py -0p` lists Python versions registered with the Windows Python Launcher. The first command creates `.venv` with the selected interpreter; the setup script then installs requirements by invoking the venv's Python as a child process. If you use another supported Python 3.11+ version, replace `3.12` in both commands with that version (for example, `py -3.11`). The setup script reuses an existing `.venv` and refuses to replace an existing directory that lacks a venv interpreter. No activation or global package installation is required. `.gitignore` excludes generated environments, private `.env` files, local databases, and common model weights.
 
 If Ollama is missing, install its official Windows application and start it. FRIDAY checks whether Ollama responds and lists installed models; it never pulls a model automatically. Install models separately and only after reviewing the Ollama Library download size and the free storage on your machine.
 
@@ -46,7 +48,31 @@ FRIDAY does not save the key in its settings or send conversation data while Loc
 ## Tests
 
 ```powershell
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 The suite includes local mock-server tests for Ollama and the OpenAI-compatible streaming client, SQLite persistence, unavailable-runtime errors, selectable profile bounds, and simulated no-GPU/driver-failure cases. Simulating absent GPU validates graceful detection paths, **not real CPU inference performance**. A real GPU/CPU inference benchmark requires a running Ollama instance and installed model on each physical configuration.
+
+## Windows distribution (experimental first build)
+
+For an initial private/technical release, use the PyInstaller **one-folder** build. It bundles Python and the Qt/runtime dependencies so recipients do not need Python, while leaving files inspectable for troubleshooting. A one-file executable is not used because it unpacks dependencies at launch and is harder to diagnose. Builds are Windows/Python/architecture-specific; create a separate build on each target architecture. No application icon asset exists in this project, so the build uses the default executable icon.
+
+Build from a Windows machine with Python 3.12 and an internet connection for pinned build dependencies:
+
+```powershell
+py -3.12 -m venv .venv
+py -3.12 setup_friday.py
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_windows.ps1
+```
+
+The `-ExecutionPolicy Bypass` applies only to this PowerShell process; it does not change the machine or user execution-policy setting. If `.venv` already exists but cannot launch, preserve it by renaming/archiving it first, then create a fresh `.venv` with the verified Python 3.12 interpreter before running setup.
+
+The build script installs `requirements-build.txt` into the project venv and produces `dist\FRIDAY\FRIDAY.exe`, with diagnostic intermediate files under `build\pyinstaller`. Direct build-tool versions are pinned; pip-resolved transitive dependencies are not yet locked, so builds are not guaranteed byte-for-byte reproducible. Both output trees are ignored by Git. The script refuses to overwrite existing outputs; move or archive them before another build. Zip the complete `dist\FRIDAY` directory to distribute it; do not send only the executable. PyInstaller's official documentation describes the one-folder layout and platform-specific build requirement. This is a portable app folder, **not an installer**, and it is not code-signed.
+
+Recipients must install Ollama separately and install at least one compatible model themselves. FRIDAY does not bundle Ollama or model weights and never downloads a model automatically. Ollama's current Windows requirements and installer instructions are on its [Windows documentation](https://docs.ollama.com/windows). Start Ollama before local chat. If it is unavailable, history and setup remain accessible, while local inference is disabled. Before a first model pull, users should review that model's published download size and their available storage; actual memory/performance varies with model quantization, context, and hardware.
+
+Conversation history remains under `%LOCALAPPDATA%\FRIDAY\friday.sqlite3`, outside the application directory. Removing the portable app folder does not remove that database; back it up or remove it separately if desired. Normal operation does not require administrator privileges. Cloud mode remains optional and requires a user-configured key plus an in-app privacy confirmation. Do not place provider keys in build settings or redistribute them.
+
+Before public distribution, resolve licensing for the FRIDAY application and inventory every bundled dependency and Qt component. Qt open-source distribution has LGPL/GPL notice, replacement/relinking, and source-availability requirements; the applicable terms depend on the exact components and distribution method. This project does not yet contain a complete third-party license bundle or an application license. Obtain an appropriate licensing review and add notices before public release. PyInstaller's own license exception permits bundling but does not override dependency licenses. Also add a chosen version/release notes, test on a clean supported Windows installation and each target architecture, and obtain/sign with a trusted code-signing certificate if SmartScreen reputation is needed. Building alone does not establish trust or eliminate antivirus false positives.
+
+The executable build is experimental until it has been smoke-tested on a separate clean Windows machine. The automated source tests and an on-device packaged smoke test do not prove compatibility on all Windows systems. A signed installer, automatic updates, telemetry, and model bundling are not part of this project.

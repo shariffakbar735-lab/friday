@@ -150,9 +150,12 @@ class UISafetyTests(unittest.TestCase):
                                          "FRIDAY_CLOUD_API_KEY": ""}), \
                  patch.object(friday_main, "QSettings", MemorySettings), \
                  patch.object(friday_main, "OllamaClient", OfflineClient), \
-                 patch.object(friday_main, "detect_hardware", return_value=snapshot):
+                patch.object(friday_main, "detect_hardware", return_value=snapshot):
                 window = friday_main.FridayWindow()
             try:
+                window.show()
+                self.app.processEvents()
+                self.assertTrue(window.isVisible())
                 worker = window.startup_worker
                 self.assertIsNotNone(worker)
                 loop = QEventLoop()
@@ -162,6 +165,7 @@ class UISafetyTests(unittest.TestCase):
                 self.assertTrue(worker.wait(1000))
                 self.app.processEvents()
                 self.assertFalse(window.snapshot.ollama_running)
+                self.assertIn("Ollama is not responding", window.status.text())
                 self.assertFalse(window.send_button.isEnabled())
                 self.assertTrue(window.history.isEnabled())
                 self.assertTrue(window.new_button.isEnabled())
