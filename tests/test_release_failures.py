@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 import unittest
@@ -79,10 +80,101 @@ class ReleaseFailureTests(unittest.TestCase):
                 pass
 
         server, thread = self.serve(Handler)
+        opened_responses = []
+        real_urlopen = ollama_module.urllib.request.urlopen
+
+        def capture_response(*args, **kwargs):
+            response = real_urlopen(*args, **kwargs)
+            opened_responses.append(response)
+            return response
+
+        try:
+            client = OllamaClient(f"http://127.0.0.1:{server.server_port}", timeout=1)
+            started = time.monotonic()
+            with patch.object(ollama_module.urllib.request, "urlopen", side_effect=capture_response):
+                with self.assertRaisesRegex(OllamaError, "invalid streaming response"):
+                    list(client.stream_chat("test:latest", [{"role": "user", "content": "hello"}]))
+            self.assertLess(time.monotonic() - started, 2, "malformed stream read did not stop promptly")
+            self.assertEqual(len(opened_responses), 1)
+            self.assertTrue(opened_responses[0].closed, "malformed stream response was not closed")
+        finally:
+            self.stop_server(server, thread)
+
+    def test_done_true_with_empty_content_is_a_successful_stream_completion(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = b'{"message":{"role":"assistant","content":""},"done":true}\n'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_args):
+                pass
+
+        server, thread = self.serve(Handler)
         try:
             client = OllamaClient(f"http://127.0.0.1:{server.server_port}")
-            with self.assertRaisesRegex(OllamaError, "invalid streaming response"):
+            self.assertEqual(list(client.stream_chat(
+                "test:latest", [{"role": "user", "content": "hello"}])), [])
+        finally:
+            self.stop_server(server, thread)
+
+    def test_clean_eof_without_done_true_is_reported_as_incomplete(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = b'{"message":{"content":"partial"},"done":false}\n'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_args):
+                pass
+
+        server, thread = self.serve(Handler)
+        try:
+            client = OllamaClient(f"http://127.0.0.1:{server.server_port}")
+            with self.assertRaisesRegex(OllamaError, "without a final done:true"):
                 list(client.stream_chat("test:latest", [{"role": "user", "content": "hello"}]))
+        finally:
+            self.stop_server(server, thread)
+
+    def test_premature_eof_before_declared_content_length_is_reported(self):
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def do_POST(self):
+                body = b'{"message":{"content":"partial"},"done":false}\n'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body) + 32))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+                self.wfile.flush()
+                try:
+                    self.connection.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                self.close_connection = True
+            def log_message(self, *_args):
+                pass
+
+        server, thread = self.serve(Handler)
+        opened_responses = []
+        real_urlopen = ollama_module.urllib.request.urlopen
+
+        def capture_response(*args, **kwargs):
+            response = real_urlopen(*args, **kwargs)
+            opened_responses.append(response)
+            return response
+
+        try:
+            client = OllamaClient(f"http://127.0.0.1:{server.server_port}", timeout=0.5)
+            started = time.monotonic()
+            with patch.object(ollama_module.urllib.request, "urlopen", side_effect=capture_response):
+                with self.assertRaisesRegex(OllamaError, "interrupted"):
+                    list(client.stream_chat("test:latest", [{"role": "user", "content": "hello"}]))
+            self.assertLess(time.monotonic() - started, 1.5, "truncated stream read did not stop promptly")
+            self.assertEqual(len(opened_responses), 1)
+            self.assertTrue(opened_responses[0].closed, "truncated stream response was not closed")
         finally:
             self.stop_server(server, thread)
 

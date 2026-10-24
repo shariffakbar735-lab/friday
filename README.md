@@ -2,6 +2,8 @@
 
 FRIDAY is a local-first Windows desktop assistant. Local chat uses Ollama; cloud inference is an optional OpenAI-compatible backend that is used only after it is configured and explicitly selected in the app. Conversation history stays in the local SQLite database.
 
+Chat messages render a safe Markdown subset: headings, bold emphasis, ordered/unordered lists, and paragraph spacing. Model text is escaped before FRIDAY inserts its own limited formatting HTML into `QTextBrowser`; raw HTML is displayed as text, and links are not activated. Ollama responses are successful only after a valid final `done: true` event. A clean end-of-stream without that marker, a malformed event, or premature network EOF is reported as an inference error; a valid empty completion does not trigger an error dialog.
+
 ## Requirements and run
 
 - Windows 10/11 and Python 3.11+
@@ -24,6 +26,14 @@ Chat data is stored at `%LOCALAPPDATA%\FRIDAY\friday.sqlite3`. Ollama calls defa
 ## Local Windows process inspection
 
 Ask FRIDAY to list or inspect running processes/applications (for example, “list my running applications”). FRIDAY reads process name, PID, executable path, and resident memory when Windows permits, using `psutil`. This operation is read-only and does not require administrator rights for ordinary listings. Fields blocked by Windows are reported as unavailable; processes that exit during collection are omitted. Large inventories are bounded to fit the selected model context and identify when the shown rows are truncated. FRIDAY routes these requests to local Ollama only—even if Cloud is selected—and never sends process metadata to a cloud provider. If local Ollama is unavailable or process inspection fails, FRIDAY reports that condition and does not ask a model to claim it succeeded.
+
+## Read-only system status
+
+Ask an explicit live-measurement question such as “check my CPU usage,” “how much RAM is being used,” “how much disk space is free,” “how much free disk space is available on C:,” or “what is my battery percentage.” “Show my computer's system status” requests a bounded snapshot of CPU, physical RAM, mounted local-drive capacity, battery information, and a bounded process list. CPU sampling runs in the existing background worker; per-logical-CPU readings are included when the OS sampler returns them, and the aggregate is their arithmetic mean. Sampling never waits on the GUI thread. RAM used is derived from total minus OS-reported available physical memory (not swap/page-file usage). Disk capacity readings retain raw byte values and include derived `total_gib`, `used_gib`, and `free_gib` fields using the binary conversion 1 GiB = 1,073,741,824 bytes; the drive mountpoint is included with each reading. An explicit drive-letter request filters to that volume. Disk results do not assess drive health. System monitoring remains implemented with Python and `psutil`; no profiling evidence currently justifies introducing a native C/C++ collector.
+
+Measurements are read-only, timestamped, structured, and routed to an installed local Ollama model even when Cloud is selected. When Cloud is selected, FRIDAY uses an already-installed local model (preferring an advisory hardware-fit recommendation, otherwise the smallest reported installed model); it does not download a model. Raw measurement snapshots and process-tool results are passed only to the local model and are not written to SQLite, logs, analytics, or telemetry. Only the ordinary user message and user-facing assistant response are stored in `%LOCALAPPDATA%\FRIDAY\friday.sqlite3`. Failed metrics retain their actual error; valid independent metrics are preserved as partial results, while a fully failed inspection is reported without asking the model to claim success. Output is bounded and marks truncation.
+
+On systems with a battery, FRIDAY reports the OS-provided charge percentage, AC power connection, and time remaining only when psutil reports a meaningful estimate. psutil does not expose reliable active charging-versus-discharging state on all Windows systems; FRIDAY marks that state unavailable rather than inferring it from AC connection. Desktop/no-battery systems report “not detected,” not zero percent. No continuously updating dashboard or background polling is enabled.
 
 ## Hardware-aware setup
 
@@ -55,7 +65,7 @@ FRIDAY does not save the key in its settings or send conversation data while Loc
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The suite includes local mock-server tests for Ollama and the OpenAI-compatible streaming client, SQLite persistence, unavailable-runtime errors, selectable profile bounds, simulated no-GPU/driver-failure cases, and mocked Windows process-inspection results and failures. Simulating absent GPU validates graceful detection paths, **not real CPU inference performance**. A real GPU/CPU inference benchmark requires a running Ollama instance and installed model on each physical configuration.
+The suite includes local mock-server tests for Ollama completion markers, malformed/truncated streams, server errors, and the OpenAI-compatible streaming client, safe incremental Markdown rendering, SQLite persistence, unavailable-runtime errors, selectable profile bounds, simulated no-GPU/driver-failure cases, mocked Windows process-inspection results, and mocked CPU/RAM/disk/battery measurements and failures. Simulating absent GPU validates graceful detection paths, **not real CPU inference performance**. A real GPU/CPU inference benchmark requires a running Ollama instance and installed model on each physical configuration.
 
 ## Windows distribution (experimental first build)
 

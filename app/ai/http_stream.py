@@ -40,12 +40,25 @@ class CancellableBodyReader:
         # drains those bytes first and otherwise performs one nonblocking socket read.
         self.sock.setblocking(False)
 
-    def _fill(self) -> bool:
-        while not self._buffer:
+    def _fill(self, minimum_bytes: int | None = None) -> bool:
+        # A non-empty partial buffer is not enough for callers requesting an
+        # exact body piece; require at least one more byte for line reads.
+        target = len(self._buffer) + 1 if minimum_bytes is None else minimum_bytes
+        while len(self._buffer) < target:
             if self.stop is not None and self.stop.is_set():
                 return False
-            pending = getattr(self.sock, "pending", None)
-            if not (callable(pending) and pending() > 0):
+            try:
+                # BufferedReader may already hold body bytes that select()
+                # cannot see. Only read before select when peek confirms that.
+                prefetched = self.fp.peek(1)
+            except (BlockingIOError, ssl.SSLWantReadError, socket.timeout):
+                prefetched = b""
+            if prefetched:
+                try:
+                    block = self.fp.read1(65536)
+                except (BlockingIOError, ssl.SSLWantReadError, socket.timeout):
+                    block = None
+            else:
                 remaining = self.timeout - (time.monotonic() - self._last_data)
                 if remaining <= 0:
                     raise TimeoutError("HTTP response timed out")
@@ -58,11 +71,13 @@ class CancellableBodyReader:
                     raise OSError("HTTP response socket is no longer readable") from exc
                 if not readable:
                     continue
-            try:
-                block = self.fp.read1(65536)
-            except (BlockingIOError, ssl.SSLWantReadError, socket.timeout):
+                try:
+                    block = self.fp.read1(65536)
+                except (BlockingIOError, ssl.SSLWantReadError, socket.timeout):
+                    continue
+            if block is None:
                 continue
-            if not block:
+            if block == b"":
                 return False
             self._buffer.extend(block)
             self._last_data = time.monotonic()
@@ -86,7 +101,7 @@ class CancellableBodyReader:
 
     def _raw_exact(self, size: int) -> bytes | None:
         while len(self._buffer) < size:
-            if not self._fill():
+            if not self._fill(size):
                 return None
         result = bytes(self._buffer[:size])
         del self._buffer[:size]
@@ -188,5 +203,5 @@ def cancellable_response(response, stop: threading.Event | None) -> Iterator[obj
     finally:
         try:
             response.close()
-        except OSError:
+        except (OSError, ValueError):
             pass

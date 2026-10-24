@@ -74,6 +74,7 @@ class OllamaClient:
         except (OSError, urllib.error.URLError) as exc:
             raise OllamaError("Could not connect to Ollama. Check that it is running and retry.") from exc
         with cancellable_response(response, stop):
+            completed = False
             try:
                 for raw_line in iter_response_lines(response, stop, self.timeout):
                     if stop is not None and stop.is_set():
@@ -94,9 +95,13 @@ class OllamaClient:
                     text = message.get("content", "")
                     if not isinstance(text, str):
                         raise OllamaError("Ollama returned an invalid streaming response.")
+                    done = item.get("done", False)
+                    if not isinstance(done, bool):
+                        raise OllamaError("Ollama returned an invalid streaming response.")
                     if text:
                         yield text
-                    if item.get("done"):
+                    if done:
+                        completed = True
                         break
             except (OSError, urllib.error.URLError) as exc:
                 if stop is not None and stop.is_set():
@@ -104,3 +109,7 @@ class OllamaClient:
                 if isinstance(exc, TimeoutError):
                     raise OllamaError(f"Ollama response timed out after {self.timeout:g} seconds.") from exc
                 raise OllamaError("Ollama connection was interrupted while receiving a response.") from exc
+            if stop is not None and stop.is_set():
+                return
+            if not completed:
+                raise OllamaError("Ollama stream ended without a final done:true completion event.")
