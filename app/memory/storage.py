@@ -83,6 +83,13 @@ class ConversationStore:
                               (conversation_id, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def message_count(self, conversation_id: str) -> int:
+        """Return the total stored-message count without reading message contents."""
+        with self._connection() as db:
+            row = db.execute("SELECT COUNT(*) FROM messages WHERE conversation_id=?",
+                             (conversation_id,)).fetchone()
+        return int(row[0])
+
     def delete_conversation(self, conversation_id: str) -> None:
         with self._connection() as db:
             db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))

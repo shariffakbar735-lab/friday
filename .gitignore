@@ -22,3 +22,17 @@ release/
 *.onnx
 *.pt
 *.pth
+
+# Manus internal worktrees
+.manus/
+
+# Test caches and generated reports
+.pytest_cache/
+.coverage
+htmlcov/
+full-test-run.txt
+stream-review.txt
+ui-test-run.txt
+
+# Runtime logs
+*.log

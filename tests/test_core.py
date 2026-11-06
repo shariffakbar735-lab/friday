@@ -66,6 +66,8 @@ class CoreTests(unittest.TestCase):
                 "qwen3:4b", [{"role":"user","content":"Hi"}], options={"num_gpu": 0})), "Hello FRIDAY")
             self.assertEqual("".join(client.stream_chat(
                 "qwen3:4b", [{"role":"user","content":"Hi again"}])), "Hello FRIDAY")
+            self.assertEqual("".join(client.stream_chat(
+                "llama3:8b", [{"role":"user","content":"Hi without reasoning"}])), "Hello FRIDAY")
             sent = json.loads(server.request_bodies[0])
             self.assertEqual(sent["model"], "qwen3:4b")
             self.assertTrue(sent["stream"])
@@ -73,6 +75,8 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(sent["think"])
             ordinary = json.loads(server.request_bodies[1])
             self.assertNotIn("num_gpu", ordinary.get("options", {}))
+            self.assertFalse(ordinary["think"])
+            self.assertNotIn("think", json.loads(server.request_bodies[2]))
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 

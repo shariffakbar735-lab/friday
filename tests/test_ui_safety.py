@@ -107,6 +107,81 @@ class UISafetyTests(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_historical_reasoning_is_hidden_and_excluded_from_future_prompts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self.make_window(directory)
+            try:
+                window.store.add_message(window.conversation_id, "user", "older question")
+                window.store.add_message(
+                    window.conversation_id, "assistant",
+                    "<think>First thought: private. The user just asked about X.</think>Earlier final answer.",
+                )
+                window.backend.blockSignals(True)
+                window.backend.setCurrentIndex(window.backend.findData("local"))
+                window.backend.blockSignals(False)
+                window.snapshot = HardwareSnapshot(
+                    16 * 1024**3, 8 * 1024**3, "AMD64", 8, None, None, None, True, True, ()
+                )
+                window.models.addItem("test:local")
+                window.input.setText("new question")
+                with patch.object(window, "_start_generation") as start:
+                    window._send()
+                prompt = " ".join(item["content"] for item in start.call_args.args[0])
+                transcript = window.transcript.toPlainText()
+                self.assertIn("Earlier final answer.", transcript)
+                self.assertNotIn("First thought", transcript)
+                self.assertNotIn("The user just asked", transcript)
+                self.assertNotIn("First thought", prompt)
+                self.assertNotIn("The user just asked", prompt)
+            finally:
+                window.close()
+
+    def test_thinking_indicator_is_replaced_by_answer_and_cleared_on_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self.make_window(directory)
+            try:
+                window.active_response_conversation_id = window.conversation_id
+                window._streaming_visible = True
+                window.streamed_text = ""
+                window._stream_pending_markdown = ""
+                window._stream_committed_html = ""
+                window._render_messages()
+                self.assertIn("Thinking…", window.transcript.toPlainText())
+
+                window._append_chunk("Final answer token")
+                self.assertNotIn("Thinking…", window.transcript.toPlainText())
+                self.assertIn("Final answer token", window.transcript.toPlainText())
+
+                window.streamed_text = ""
+                window._stream_pending_markdown = ""
+                window._stream_committed_html = ""
+                window._render_messages()
+                self.assertIn("Thinking…", window.transcript.toPlainText())
+                with patch.object(QMessageBox, "warning"):
+                    window._show_error("Ollama response timed out; retry the request.")
+                self.assertNotIn("Thinking…", window.transcript.toPlainText())
+            finally:
+                window.close()
+
+    def test_structured_thinking_panel_is_muted_and_collapsible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self.make_window(directory)
+            try:
+                self.assertEqual(window.windowTitle(), "FRIDAY — Local AI Assistant")
+                self.assertEqual(window.backend.itemText(0), "Local — Ollama")
+                self.assertEqual(window.input.placeholderText(), "Message FRIDAY…")
+                window.active_response_conversation_id = window.conversation_id
+                window._append_thinking_chunk("private thought")
+                self.assertFalse(window.thinking_toggle.isHidden())
+                self.assertFalse(window.thinking_panel.isHidden())
+                self.assertIn("#9aa6b2", window.thinking_panel.styleSheet())
+                self.assertIn("border-left", window.thinking_panel.styleSheet())
+                window._toggle_thinking_panel()
+                self.assertTrue(window.thinking_panel.isHidden())
+                self.assertIn("Thought for", window.thinking_toggle.text())
+            finally:
+                window.close()
+
     def test_valid_empty_local_completion_is_not_a_worker_failure(self):
         class EmptyCompletedClient:
             def stream_chat(self, *_args, **_kwargs):
@@ -288,6 +363,30 @@ class UISafetyTests(unittest.TestCase):
         self.assertNotIn("<script", rendered.lower())
         self.assertIn("&lt;script&gt;", rendered.lower())
         self.assertNotIn("<a ", rendered.lower())
+
+    def test_reasoning_never_reaches_live_or_persisted_ui_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self.make_window(directory)
+            try:
+                window.active_response_conversation_id = window.conversation_id
+                window._streaming_visible = True
+                window._render_messages()
+                window._finish_response(
+                    "First thought: The user just asked how are you?</think>I am well."
+                )
+                rendered = window.transcript.toPlainText()
+                stored = " ".join(
+                    message["content"]
+                    for message in window.store.get_messages(window.conversation_id)
+                )
+                for text in (rendered, stored):
+                    self.assertNotIn("First thought", text)
+                    self.assertNotIn("The user just asked", text)
+                    self.assertNotIn("</think>", text)
+                self.assertIn("I am well.", rendered)
+                self.assertIn("I am well.", stored)
+            finally:
+                window.close()
 
     def test_incremental_markdown_stream_formats_blocks_safely_and_keeps_scroll(self):
         with tempfile.TemporaryDirectory() as directory:

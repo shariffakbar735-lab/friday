@@ -52,6 +52,7 @@ class ReleaseFailureTests(unittest.TestCase):
     def test_model_missing_error_event_is_reported(self):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 body = b'{"error":"model not found"}\n'
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
@@ -71,7 +72,7 @@ class ReleaseFailureTests(unittest.TestCase):
     def test_malformed_stream_is_reported_and_response_is_closed(self):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
-                body = b'{not-json}\n'
+                body = b'{not-json "private reasoning sentinel"}\n'
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -92,11 +93,19 @@ class ReleaseFailureTests(unittest.TestCase):
             client = OllamaClient(f"http://127.0.0.1:{server.server_port}", timeout=1)
             started = time.monotonic()
             with patch.object(ollama_module.urllib.request, "urlopen", side_effect=capture_response):
-                with self.assertRaisesRegex(OllamaError, "invalid streaming response"):
-                    list(client.stream_chat("test:latest", [{"role": "user", "content": "hello"}]))
+                with self.assertLogs(ollama_module.__name__, level="WARNING") as logs:
+                    with self.assertRaisesRegex(OllamaError, "invalid streaming response.*malformed JSON") as raised:
+                        list(client.stream_chat(
+                            "test:latest", [{"role": "user", "content": "private prompt sentinel"}]
+                        ))
             self.assertLess(time.monotonic() - started, 2, "malformed stream read did not stop promptly")
             self.assertEqual(len(opened_responses), 1)
             self.assertTrue(opened_responses[0].closed, "malformed stream response was not closed")
+            diagnostic = " ".join(logs.output)
+            self.assertIn("malformed_json", diagnostic)
+            self.assertNotIn("private reasoning sentinel", diagnostic)
+            self.assertNotIn("private prompt sentinel", diagnostic)
+            self.assertNotIn("private reasoning sentinel", str(raised.exception))
         finally:
             self.stop_server(server, thread)
 

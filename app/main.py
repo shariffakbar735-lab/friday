@@ -20,7 +20,10 @@ from app.ai.cloud_client import CloudConfigurationError, OpenAICompatibleClient
 from app.ai.hardware import HardwareSnapshot, detect_hardware, estimate_model_fits, recommend_model
 from app.ai.ollama_client import Model, OllamaClient, OllamaError
 from app.ai.profiles import PROFILES
+from app.ai.reasoning import sanitize_final_text
 from app.memory.storage import ConversationStore
+from app.system.actions import ActionRequest, ActionResult, ActionService
+from app.system.action_intents import ActionIntentError, parse_action_text
 from app.system.processes import (
     ProcessInspectionError,
     format_process_observations,
@@ -201,6 +204,7 @@ class StartupWorker(QThread):
 
 class ChatWorker(QThread):
     chunk = Signal(str)
+    thinking_chunk = Signal(str)
     failed = Signal(str, str)
     finished_text = Signal(str)
     activity = Signal(str)
@@ -331,7 +335,13 @@ class ChatWorker(QThread):
                 stream = cloud.stream_chat(self.messages, self.stop_event,
                                            max_tokens=int(self.options["num_predict"]))
             else:
-                stream = self.client.stream_chat(self.model, messages, self.stop_event, self.options)
+                thinking_callback = self.thinking_chunk.emit if isinstance(self.client, OllamaClient) else None
+                stream = self.client.stream_chat(
+                    self.model, messages, self.stop_event, self.options,
+                    thinking_callback=thinking_callback,
+                ) if thinking_callback is not None else self.client.stream_chat(
+                    self.model, messages, self.stop_event, self.options,
+                )
             for piece in stream:
                 pieces.append(piece)
                 self.chunk.emit(piece)
@@ -349,6 +359,31 @@ class ChatWorker(QThread):
 
     def stop(self) -> None:
         self.stop_event.set()
+
+
+class ActionWorker(QThread):
+    completed = Signal(object)
+
+    def __init__(self, service: ActionService, request: ActionRequest) -> None:
+        super().__init__()
+        self.service, self.request = service, request
+
+    def run(self) -> None:
+        try:
+            result = self.service.execute(self.request)
+        except Exception as exc:
+            result = ActionResult(
+                self.request.action, False,
+                f"Local action failed safely: {type(exc).__name__}: {exc}",
+            )
+        self.completed.emit(result)
+
+
+@dataclass
+class _TransientActionTurn:
+    after_message_count: int
+    user_text: str
+    result_text: str
 
 
 class BenchmarkWorker(QThread):
@@ -388,9 +423,14 @@ class FridayWindow(QMainWindow):
         self.settings = QSettings("FRIDAY", "FRIDAY")
         data_dir = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FRIDAY"
         self.store = ConversationStore(data_dir / "friday.sqlite3")
+        self.action_service = ActionService(data_dir)
         self.client = OllamaClient()
         self.conversation_id = self.store.create_conversation()
         self.worker: ChatWorker | None = None
+        self.action_worker: ActionWorker | None = None
+        self._action_turns: dict[str, list[_TransientActionTurn]] = {}
+        self._active_action_turn: _TransientActionTurn | None = None
+        self._active_action_conversation_id: str | None = None
         self.startup_worker: StartupWorker | None = None
         self.benchmark_worker: BenchmarkWorker | None = None
         self.snapshot: HardwareSnapshot | None = None
@@ -403,6 +443,10 @@ class FridayWindow(QMainWindow):
         self._stream_committed_html = ""
         self.active_response_conversation_id: str | None = None
         self.active_messages: list[dict[str, str]] = []
+        self._thinking_text = ""
+        self._thinking_started_at: float | None = None
+        self._thinking_elapsed = 0.0
+        self._thinking_collapsed = False
         self.last_failed_conversation_id: str | None = None
         self.active_generation_backend = "local"
         self.idle_status_text = ""
@@ -466,6 +510,21 @@ class FridayWindow(QMainWindow):
         layout.addLayout(sidebar, 1)
 
         chat = QVBoxLayout()
+        self.thinking_toggle = QPushButton("▾ Thought for 0 seconds")
+        self.thinking_toggle.setVisible(False)
+        self.thinking_toggle.setStyleSheet(
+            "QPushButton{background:transparent;border:0;color:#9aa6b2;text-align:left;padding:4px 8px;font-size:small}"
+        )
+        self.thinking_toggle.clicked.connect(self._toggle_thinking_panel)
+        chat.addWidget(self.thinking_toggle)
+        self.thinking_panel = QTextBrowser()
+        self.thinking_panel.setVisible(False)
+        self.thinking_panel.setMaximumHeight(150)
+        self.thinking_panel.setStyleSheet(
+            "QTextBrowser{background:#151d29;color:#9aa6b2;border:0;border-left:2px solid #52606d;"
+            "padding:6px 10px;margin-left:8px;font-size:small}"
+        )
+        chat.addWidget(self.thinking_panel)
         self.transcript = QTextBrowser()
         self.transcript.setOpenExternalLinks(False)
         self.transcript.setOpenLinks(False)
@@ -527,7 +586,7 @@ class FridayWindow(QMainWindow):
         installed_names = {model.name for model in models}
         preferred = saved_model if saved_model in installed_names else suggested
         if not preferred and models:
-            preferred = "qwen3:4b" if "qwen3:4b" in installed_names else models[0].name
+            preferred = "qwen3.5:4b" if "qwen3.5:4b" in installed_names else ("qwen3:4b" if "qwen3:4b" in installed_names else models[0].name)
         selected = self.models.findText(str(preferred or ""))
         if selected >= 0:
             self.models.setCurrentIndex(selected)
@@ -538,8 +597,8 @@ class FridayWindow(QMainWindow):
             self.status.setToolTip(error or "Start Ollama to enable local chat.")
         else:
             model_line = f"{len(models)} local model(s)" if models else "Ollama running; no local models installed"
-            self.status.setText(f"{snapshot.ram_total_bytes / 1024**3:.1f} GB RAM · " if snapshot.ram_total_bytes else "RAM unknown · "
-                                f"{snapshot.gpu_name or 'CPU-only'} · {model_line}")
+            self.status.setText(f"{snapshot.ram_total_bytes / 1024**3:.1f} GB RAM Â· " if snapshot.ram_total_bytes else "RAM unknown Â· "
+                                f"{snapshot.gpu_name or 'CPU-only'} Â· {model_line}")
         self.idle_status_text = self.status.text()
         if self.backend.currentData() == "local":
             self.send_button.setEnabled(bool(models) and snapshot.ollama_running)
@@ -638,7 +697,7 @@ class FridayWindow(QMainWindow):
         QMessageBox.information(self, "FRIDAY hardware & setup", "\n\n".join(lines))
 
     def _run_benchmark(self) -> None:
-        if self.worker is not None or self.benchmark_worker is not None:
+        if self.worker is not None or self.action_worker is not None or self.benchmark_worker is not None:
             return
         if not self.snapshot or not self.snapshot.ollama_running or not self.models.currentText() or self.backend.currentData() != "local":
             QMessageBox.information(self, "FRIDAY benchmark", "Start Ollama and select an installed local model before benchmarking.")
@@ -695,12 +754,42 @@ class FridayWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum() if was_at_bottom else min(value, scrollbar.maximum()))
 
     def _render_messages(self) -> None:
+        self._render_thinking_panel()
         scroll_value, was_at_bottom = self._capture_transcript_scroll()
         parts = []
-        for msg in self.store.get_messages(self.conversation_id):
-            label = "You" if msg["role"] == "user" else "FRIDAY"
-            body = safe_markdown_to_html(msg["content"])
+
+        def append_message(role: str, content: str) -> None:
+            label = "You" if role == "user" else "FRIDAY"
+            if role == "assistant":
+                content = sanitize_final_text(content)
+            body = safe_markdown_to_html(content)
             parts.append(f'<p style="margin:0 0 6px 0"><b>{label}</b></p>{body}')
+
+        messages = self.store.get_messages(self.conversation_id, limit=200)
+        total = self.store.message_count(self.conversation_id)
+        first_index = max(0, total - len(messages))
+        turns_by_count: dict[int, list[_TransientActionTurn]] = {}
+        for turn in self._action_turns.get(self.conversation_id, []):
+            turns_by_count.setdefault(turn.after_message_count, []).append(turn)
+
+        def append_turn(turn: _TransientActionTurn) -> None:
+            append_message("user", turn.user_text)
+            append_message("assistant", turn.result_text)
+
+        for anchor in sorted(key for key in turns_by_count if key < first_index):
+            for turn in turns_by_count.pop(anchor):
+                append_turn(turn)
+        for index in range(len(messages) + 1):
+            anchor = first_index + index
+            for turn in turns_by_count.pop(anchor, []):
+                append_turn(turn)
+            if index == len(messages):
+                break
+            msg = messages[index]
+            append_message(msg["role"], msg["content"])
+        for anchor in sorted(turns_by_count):
+            for turn in turns_by_count[anchor]:
+                append_turn(turn)
         show_stream = (
             self._streaming_visible
             and self.active_response_conversation_id == self.conversation_id
@@ -718,10 +807,78 @@ class FridayWindow(QMainWindow):
             cursor.movePosition(QTextCursor.MoveOperation.End)
             cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
             self._stream_tail_start = cursor.position()
+            if not (self.streamed_text or self._stream_pending_markdown or self._stream_committed_html):
+                cursor.insertHtml(
+                    '<p style="margin:0 0 8px 0;color:#888;font-size:small">Thinking…</p>'
+                )
+                cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
             if self._stream_pending_markdown:
                 cursor.insertHtml(safe_markdown_to_html(self._stream_pending_markdown))
             self._stream_cursor = cursor
         self._restore_transcript_scroll(scroll_value, was_at_bottom)
+
+    def _toggle_thinking_panel(self) -> None:
+        self._thinking_collapsed = not self._thinking_collapsed
+        self._render_thinking_panel()
+
+    def _render_thinking_panel(self) -> None:
+        visible = bool(self._thinking_text) and self.active_response_conversation_id == self.conversation_id
+        self.thinking_toggle.setVisible(visible)
+        self.thinking_panel.setVisible(visible and not self._thinking_collapsed)
+        if not visible:
+            return
+        elapsed = self._thinking_elapsed
+        if self._thinking_started_at is not None:
+            elapsed = max(elapsed, time.monotonic() - self._thinking_started_at)
+        self.thinking_toggle.setText(
+            f"{'▸' if self._thinking_collapsed else '▾'} Thought for {elapsed:.0f} seconds"
+        )
+        self.thinking_panel.setHtml(safe_markdown_to_html(self._thinking_text))
+
+    def _new_action_turn(self, text: str, result_text: str) -> _TransientActionTurn:
+        turn = _TransientActionTurn(
+            self.store.message_count(self.conversation_id), text, result_text
+        )
+        self._action_turns.setdefault(self.conversation_id, []).append(turn)
+        return turn
+
+    def _reject_action_text(self, text: str, reason: str) -> None:
+        self.action_service.record_rejected_request()
+        self._new_action_turn(text, "No action was run. " + reason)
+        self.input.clear()
+        self._render_messages()
+
+    def _start_local_action(self, text: str, request: ActionRequest) -> None:
+        turn = self._new_action_turn(text, "Running this action locally; no Cloud data is sent…")
+        self._active_action_turn = turn
+        self._active_action_conversation_id = self.conversation_id
+        self.input.clear()
+        self._render_messages()
+        self.action_worker = ActionWorker(self.action_service, request)
+        self.action_worker.completed.connect(self._action_completed)
+        self.action_worker.finished.connect(self._action_stopped)
+        self._set_busy(True)
+        self.stop_button.setEnabled(False)
+        self.status.setText("Running a local Windows action (read-only scope)…")
+        self.action_worker.start()
+
+    def _action_completed(self, result: ActionResult) -> None:
+        turn = self._active_action_turn
+        if turn is None:
+            return
+        turn.result_text = result.display_text
+        if self._active_action_conversation_id == self.conversation_id:
+            self._render_messages()
+        self.status.setText("Local action completed." if result.success else "No local action was performed.")
+
+    def _action_stopped(self) -> None:
+        self.action_worker = None
+        self._active_action_turn = None
+        self._active_action_conversation_id = None
+        self._set_busy(self.worker is not None or self.benchmark_worker is not None)
+        self.stop_button.setEnabled(False)
+        if self.idle_status_text:
+            self.status.setText(self.idle_status_text)
 
     def _new_conversation(self) -> None:
         self.conversation_id = self.store.create_conversation()
@@ -751,9 +908,25 @@ class FridayWindow(QMainWindow):
 
     def _send(self) -> None:
         text = self.input.text().strip()
-        if not text or self.worker is not None or self.benchmark_worker is not None:
+        if (not text or self.worker is not None or self.action_worker is not None
+                or self.benchmark_worker is not None):
+            return
+        profile = PROFILES[self._profile_key()]
+        char_budget = prompt_char_budget(profile.num_ctx)
+        if len(text) > char_budget:
+            QMessageBox.warning(self, "FRIDAY context limit",
+                                f"This message exceeds the conservative {char_budget}-character input limit for the {profile.display_name} profile. Shorten it or choose a larger context profile.")
             return
         system_request = detect_system_request(text)
+        if system_request is None:
+            try:
+                action_request = parse_action_text(text)
+            except ActionIntentError as exc:
+                self._reject_action_text(text, str(exc))
+                return
+            if action_request is not None:
+                self._start_local_action(text, action_request)
+                return
         inspect_processes = bool(
             system_request is not None
             and system_request.metrics == ("processes",)
@@ -763,12 +936,6 @@ class FridayWindow(QMainWindow):
         # Measurements/process metadata are strictly local, irrespective of the saved backend.
         provider = "local" if system_request else self.backend.currentData()
         system_model = self._local_model_for_system_request() if system_request else None
-        profile = PROFILES[self._profile_key()]
-        char_budget = prompt_char_budget(profile.num_ctx)
-        if len(text) > char_budget:
-            QMessageBox.warning(self, "FRIDAY context limit",
-                                f"This message exceeds the conservative {char_budget}-character input limit for the {profile.display_name} profile. Shorten it or choose a larger context profile.")
-            return
         self.store.add_message(self.conversation_id, "user", text)
         self.input.clear()
         self._render_messages()
@@ -800,6 +967,11 @@ class FridayWindow(QMainWindow):
             self._refresh_history()
             return
         messages = self.store.get_messages(self.conversation_id, limit=40)
+        messages = [
+            {**message, "content": sanitize_final_text(message.get("content", ""))}
+            if message.get("role") == "assistant" else message
+            for message in messages
+        ]
         messages = bounded_context(messages, char_budget)
         self._start_generation(
             messages, provider, cpu_only=False, inspect_processes=inspect_processes,
@@ -815,10 +987,17 @@ class FridayWindow(QMainWindow):
                           top_processes_by_memory: bool = False,
                           model_override: str | None = None,
                           disk_mountpoint: str | None = None) -> None:
-        if self.worker is not None or self.benchmark_worker is not None:
+        if self.worker is not None or self.action_worker is not None or self.benchmark_worker is not None:
             return
         profile = PROFILES[self._profile_key()]
-        prompt_messages = [{"role": "system", "content": profile.system_instruction}, *messages]
+        system_instruction = profile.system_instruction
+        if provider == "local":
+            system_instruction += (
+                " Return only the final answer; do not expose internal reasoning. "
+                "For greetings and simple questions, answer directly in one brief sentence; "
+                "do not add analysis or a preamble."
+            )
+        prompt_messages = [{"role": "system", "content": system_instruction}, *messages]
         options: dict[str, int | float] = {"num_ctx": profile.num_ctx, "num_predict": profile.num_predict, "temperature": 0.2}
         if cpu_only and provider == "local":
             options["num_gpu"] = 0
@@ -829,6 +1008,10 @@ class FridayWindow(QMainWindow):
         self._stream_tail_start = None
         self._stream_pending_markdown = ""
         self._stream_committed_html = ""
+        self._thinking_text = ""
+        self._thinking_started_at = None
+        self._thinking_elapsed = 0.0
+        self._thinking_collapsed = False
         self.active_response_conversation_id = self.conversation_id
         self.active_messages = messages
         self.active_generation_backend = provider
@@ -838,6 +1021,7 @@ class FridayWindow(QMainWindow):
             system_metrics, top_processes_by_memory, disk_mountpoint,
         )
         self.worker.chunk.connect(self._append_chunk)
+        self.worker.thinking_chunk.connect(self._append_thinking_chunk)
         self.worker.failed.connect(self._show_error)
         self.worker.finished_text.connect(self._finish_response)
         self.worker.finished.connect(self._worker_stopped)
@@ -849,7 +1033,8 @@ class FridayWindow(QMainWindow):
         self.worker.start()
 
     def _retry_cpu(self) -> None:
-        if self.worker is None and self.benchmark_worker is None and self.active_messages:
+        if (self.worker is None and self.action_worker is None
+                and self.benchmark_worker is None and self.active_messages):
             if self.last_failed_conversation_id != self.conversation_id:
                 QMessageBox.information(self, "FRIDAY CPU retry", "Return to the conversation where the GPU error occurred before retrying.")
                 return
@@ -890,6 +1075,14 @@ class FridayWindow(QMainWindow):
             cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
             self._stream_tail_start = cursor.position()
 
+    def _append_thinking_chunk(self, chunk: str) -> None:
+        if not chunk:
+            return
+        if self._thinking_started_at is None:
+            self._thinking_started_at = time.monotonic()
+        self._thinking_text += chunk
+        self._render_thinking_panel()
+
     def _append_chunk(self, chunk: str) -> None:
         if not chunk:
             return
@@ -928,19 +1121,31 @@ class FridayWindow(QMainWindow):
         if target:
             self.last_failed_conversation_id = target
             if partial_text.strip():
-                self.store.add_message(target, "assistant", partial_text)
-                self.streamed_text = ""
-                self._streaming_visible = False
-                self._stream_cursor = None
-                self._stream_tail_start = None
-                self._stream_pending_markdown = ""
-                self._stream_committed_html = ""
-                self._render_messages()
+                safe_partial = sanitize_final_text(partial_text)
+                if safe_partial.strip():
+                    self.store.add_message(target, "assistant", safe_partial)
+            self.streamed_text = ""
+            self._streaming_visible = False
+            self._stream_cursor = None
+            self._stream_tail_start = None
+            self._stream_pending_markdown = ""
+            self._stream_committed_html = ""
+            self._thinking_text = ""
+            self._thinking_started_at = None
+            self._thinking_elapsed = 0.0
+            self._render_messages()
+            if partial_text.strip():
                 self._refresh_history()
         QMessageBox.warning(self, "FRIDAY — inference error", message + (
             "\n\nIf this is a GPU/driver initialization problem, you can explicitly retry the last request on CPU. CPU mode may be substantially slower." if gpu_error else ""))
 
     def _finish_response(self, text: str) -> None:
+        text = sanitize_final_text(text)
+        if self._thinking_started_at is not None:
+            self._thinking_elapsed = max(
+                self._thinking_elapsed, time.monotonic() - self._thinking_started_at
+            )
+            self._thinking_started_at = None
         if text.strip():
             target = self.active_response_conversation_id or self.conversation_id
             self.store.add_message(target, "assistant", text)
